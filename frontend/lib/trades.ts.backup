@@ -1,0 +1,212 @@
+import { supabase } from './supabase';
+import { Trade, Tag, TradeTag } from './supabase';
+
+export interface CreateTradeData {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  quantity: number;
+  entry_price: number;
+  exit_price: number;
+  commission?: number;
+  setup?: string;
+  mistakes?: string;
+  lessons?: string;
+  market_conditions?: string;
+  sector_momentum?: string;
+  stop_loss?: number;
+  target?: number;
+  screenshots?: string[];
+  date?: string;
+  entry_time?: string;
+  exit_time?: string;
+}
+
+export interface TradeWithTags extends Trade {
+  tags: Tag[];
+}
+
+export class TradesAPI {
+  static async createTrade(tradeData: CreateTradeData, tagIds: string[] = []): Promise<Trade> {
+    // Get current user for user_id
+    const { data: { user } } = await supabase.auth.getUser();
+    
+    if (!user) {
+      throw new Error('No authenticated user found. Please sign in first.');
+    }
+
+    // Calculate P&L
+    const grossPnl = (tradeData.exit_price - tradeData.entry_price) * tradeData.quantity;
+    const netPnl = grossPnl - (tradeData.commission || 0);
+
+    // Calculate risk/reward if we have stop loss and target
+    let riskReward = null;
+    if (tradeData.stop_loss && tradeData.target) {
+      const risk = Math.abs(tradeData.entry_price - tradeData.stop_loss);
+      const reward = Math.abs(tradeData.target - tradeData.entry_price);
+      riskReward = reward / risk;
+    }
+
+    const trade = {
+      ...tradeData,
+      user_id: user.id,
+      gross_pnl: grossPnl,
+      net_pnl: netPnl,
+      risk_reward: riskReward,
+      commission: tradeData.commission || 0,
+      screenshots: tradeData.screenshots || [],
+      date: tradeData.date || new Date().toISOString().split('T')[0],
+      entry_time: tradeData.entry_time || new Date().toISOString(),
+      exit_time: tradeData.exit_time || new Date().toISOString(),
+    };
+
+    // Insert trade
+    const { data: tradeResult, error: tradeError } = await supabase
+      .from('trades')
+      .insert(trade)
+      .select()
+      .single();
+
+    if (tradeError) throw tradeError;
+
+    // Add tags if provided
+    if (tagIds.length > 0 && tradeResult) {
+      const { error: tagError } = await supabase
+        .from('trade_tags')
+        .insert(
+          tagIds.map(tagId => ({
+            trade_id: tradeResult.id,
+            tag_id: tagId
+          }))
+        );
+
+      if (tagError) throw tagError;
+    }
+
+    return tradeResult;
+  }
+
+  static async getTrades(limit = 50, offset = 0): Promise<TradeWithTags[]> {
+    const { data, error } = await supabase
+      .from('trades')
+      .select(`
+        *,
+        trade_tags(
+          tags(*)
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) throw error;
+
+    // Transform the data to flatten tags
+    return data.map(trade => ({
+      ...trade,
+      tags: trade.trade_tags?.map((tt: any) => tt.tags).filter(Boolean) || []
+    }));
+  }
+
+  static async getTradeById(id: string): Promise<TradeWithTags | null> {
+    const { data, error } = await supabase
+      .from('trades')
+      .select(`
+        *,
+        trade_tags(
+          tags(*)
+        )
+      `)
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') return null;
+      throw error;
+    }
+
+    return {
+      ...data,
+      tags: data.trade_tags?.map((tt: any) => tt.tags).filter(Boolean) || []
+    };
+  }
+
+  static async updateTrade(id: string, updates: Partial<CreateTradeData>): Promise<Trade> {
+    // Recalculate P&L if price/quantity changed
+    let updateData: any = { ...updates };
+    
+    if (updates.entry_price || updates.exit_price || updates.quantity || updates.commission !== undefined) {
+      const { data: currentTrade } = await supabase
+        .from('trades')
+        .select('entry_price, exit_price, quantity, commission')
+        .eq('id', id)
+        .single();
+
+      if (currentTrade) {
+        const entryPrice = updates.entry_price ?? currentTrade.entry_price;
+        const exitPrice = updates.exit_price ?? currentTrade.exit_price;
+        const quantity = updates.quantity ?? currentTrade.quantity;
+        const commission = updates.commission ?? currentTrade.commission;
+
+        const grossPnl = (exitPrice - entryPrice) * quantity;
+        const netPnl = grossPnl - commission;
+
+        updateData = { ...updateData, gross_pnl: grossPnl, net_pnl: netPnl };
+      }
+    }
+
+    const { data, error } = await supabase
+      .from('trades')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data;
+  }
+
+  static async deleteTrade(id: string): Promise<void> {
+    const { error } = await supabase
+      .from('trades')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  static async getTradeStats() {
+    const { data: trades, error } = await supabase
+      .from('trades')
+      .select('net_pnl, side, created_at');
+
+    if (error) throw error;
+
+    const totalTrades = trades.length;
+    const winningTrades = trades.filter(t => t.net_pnl > 0).length;
+    const losingTrades = trades.filter(t => t.net_pnl < 0).length;
+    const totalPnl = trades.reduce((sum, t) => sum + t.net_pnl, 0);
+    const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+
+    // Calculate today's P&L
+    const today = new Date().toISOString().split('T')[0];
+    const todaysTrades = trades.filter(t => t.created_at.startsWith(today));
+    const todaysPnl = todaysTrades.reduce((sum, t) => sum + t.net_pnl, 0);
+
+    // Calculate this week's P&L
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const thisWeekTrades = trades.filter(t => new Date(t.created_at) >= weekAgo);
+    const thisWeekPnl = thisWeekTrades.reduce((sum, t) => sum + t.net_pnl, 0);
+
+    return {
+      totalTrades,
+      winningTrades,
+      losingTrades,
+      winRate,
+      totalPnl,
+      todaysPnl,
+      todaysTradeCount: todaysTrades.length,
+      thisWeekPnl,
+      thisWeekTradeCount: thisWeekTrades.length
+    };
+  }
+} 
