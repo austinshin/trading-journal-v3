@@ -221,7 +221,8 @@ export class TradesAPI {
     try {
       // Fetch real market data from backend
       console.log(`Fetching market data for ${trade.symbol} from backend...`);
-      const response = await fetch(`http://localhost:8000/enrich/${trade.symbol}`);
+      const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${API_BASE}/enrich/${trade.symbol}`);
       
       console.log(`Response status: ${response.status}, OK: ${response.ok}`);
       
