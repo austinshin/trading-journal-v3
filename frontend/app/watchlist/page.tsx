@@ -28,6 +28,7 @@ interface StockData {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+console.log('API_BASE:', API_BASE);
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
 export default function WatchlistPage() {
@@ -38,8 +39,11 @@ export default function WatchlistPage() {
     .filter(Boolean)
     .join(",");
 
+  const requestUrl = tickers ? `${API_BASE}/analyze?tickers=${tickers}` : null;
+  console.log('Request URL:', requestUrl);
+
   const { data, error, isLoading, mutate } = useSWR<{ results: StockData[] }>(
-    tickers ? `${API_BASE}/analyze?tickers=${tickers}` : null,
+    requestUrl,
     fetcher,
     { refreshInterval: 30000 }
   );
